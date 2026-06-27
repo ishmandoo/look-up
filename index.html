@@ -1,15 +1,356 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="manifest" href="/manifest.json" />
-    <meta name="theme-color" content="#0b1220" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>look up</title>
-  </head>
-  <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>look up</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1220;
+      --surface: #131b2e;
+      --text: #e8edf7;
+      --muted: #8b96ad;
+      --accent: #5fb4ff;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    #app {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 20px max(24px, env(safe-area-inset-bottom));
+      text-align: center;
+      gap: 16px;
+    }
+    .status {
+      color: var(--muted);
+      font-size: 1rem;
+      max-width: 320px;
+      line-height: 1.4;
+    }
+    .silhouette {
+      width: 160px;
+      height: 160px;
+      color: var(--accent);
+      transition: transform 0.6s ease;
+    }
+    .silhouette svg { width: 100%; height: 100%; display: block; }
+    .callsign {
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .category {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-top: -8px;
+    }
+    .route { font-size: 1.1rem; color: var(--text); }
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(110px, 1fr));
+      gap: 10px 18px;
+      margin-top: 8px;
+      width: 100%;
+      max-width: 340px;
+    }
+    .info-cell {
+      background: var(--surface);
+      border-radius: 12px;
+      padding: 10px 12px;
+      text-align: left;
+    }
+    .info-label {
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .info-value { font-size: 1.1rem; font-weight: 600; margin-top: 2px; }
+    .refresh-note { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
+    .manual-location { display: flex; gap: 8px; margin-top: 8px; }
+    .manual-location input {
+      width: 110px;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid #2a3650;
+      background: var(--surface);
+      color: var(--text);
+    }
+    .manual-location button {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: none;
+      background: var(--accent);
+      color: #06192e;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script>
+  "use strict";
+
+  // ---- config ----------------------------------------------------------
+  const POLL_INTERVAL_MS = 25000;
+  const SEARCH_RADIUS_NM = 10;
+  const NM_TO_KM = 1.852;
+
+  // ---- geolocation -----------------------------------------------------
+  function getCurrentPosition() {
+    return new Promise((resolve, reject) => {
+      if (!("geolocation" in navigator)) {
+        reject(new Error("Geolocation is not supported on this device."));
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+        (err) => reject(err),
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+      );
+    });
+  }
+
+  // ---- airplanes.live --------------------------------------------------
+  // Single API call returns aircraft near a point, already enriched with
+  // type/registration/owner plus pre-computed distance + bearing. It sends
+  // Access-Control-Allow-Origin: *, so the browser can call it directly.
+  async function fetchNearby(center, radiusNm) {
+    const url = `https://api.airplanes.live/v2/point/${center.lat.toFixed(4)}/${center.lon.toFixed(4)}/${radiusNm}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("airplanes.live request failed: " + res.status);
+    const data = await res.json();
+    return (data.ac || []).map(normalize);
+  }
+
+  function normalize(raw) {
+    const trimOrNull = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+    return {
+      hex: (raw.hex || "").trim(),
+      callsign: trimOrNull(raw.flight),
+      registration: trimOrNull(raw.r),
+      icaoType: trimOrNull(raw.t),
+      description: trimOrNull(raw.desc),
+      owner: trimOrNull(raw.ownOp),
+      altitudeFt: typeof raw.alt_baro === "number" ? raw.alt_baro : null,
+      groundSpeedKt: typeof raw.gs === "number" ? raw.gs : null,
+      headingDeg: typeof raw.track === "number" ? raw.track : null,
+      distanceNm: typeof raw.dst === "number" ? raw.dst : null,
+      bearingDeg: typeof raw.dir === "number" ? raw.dir : null,
+    };
+  }
+
+  // Closest airborne aircraft; the API already provides distance.
+  function findNearest(list) {
+    const airborne = list.filter((a) => a.altitudeFt !== null && a.distanceNm !== null);
+    if (airborne.length === 0) return null;
+    return airborne.reduce((best, a) =>
+      (a.distanceNm ?? Infinity) < (best.distanceNm ?? Infinity) ? a : best
+    );
+  }
+
+  // ---- aircraft type -> category --------------------------------------
+  const TYPE_MAP = {
+    // narrowbody twinjets
+    A318: "narrowbody", A319: "narrowbody", A320: "narrowbody", A321: "narrowbody",
+    A19N: "narrowbody", A20N: "narrowbody", A21N: "narrowbody",
+    B731: "narrowbody", B732: "narrowbody", B733: "narrowbody", B734: "narrowbody",
+    B735: "narrowbody", B736: "narrowbody", B737: "narrowbody", B738: "narrowbody",
+    B739: "narrowbody", B38M: "narrowbody", B39M: "narrowbody", B3XM: "narrowbody",
+    MD80: "narrowbody", MD90: "narrowbody",
+    // widebody twinjets
+    A330: "widebody-twin", A332: "widebody-twin", A333: "widebody-twin",
+    A338: "widebody-twin", A339: "widebody-twin",
+    A350: "widebody-twin", A35K: "widebody-twin",
+    B767: "widebody-twin", B762: "widebody-twin", B763: "widebody-twin",
+    B777: "widebody-twin", B772: "widebody-twin", B773: "widebody-twin", B77W: "widebody-twin", B77L: "widebody-twin",
+    B787: "widebody-twin", B788: "widebody-twin", B789: "widebody-twin", B78X: "widebody-twin",
+    // widebody quads
+    A340: "widebody-quad", A346: "widebody-quad",
+    A380: "widebody-quad", A388: "widebody-quad",
+    B747: "widebody-quad", B744: "widebody-quad", B748: "widebody-quad",
+    // regional jets / turboprops
+    CRJ2: "regional-jet", CRJ7: "regional-jet", CRJ9: "regional-jet", CRJX: "regional-jet",
+    E135: "regional-jet", E145: "regional-jet", E170: "regional-jet", E175: "regional-jet",
+    E190: "regional-jet", E195: "regional-jet", E75L: "regional-jet", E75S: "regional-jet",
+    AT72: "turboprop", AT45: "turboprop", AT76: "turboprop", DH8A: "turboprop", DH8D: "turboprop",
+    SF34: "turboprop", B350: "turboprop",
+    // general aviation
+    C172: "ga-single", C152: "ga-single", C182: "ga-single", SR22: "ga-single", P28A: "ga-single",
+    PA28: "ga-single", PA34: "ga-single", BE36: "ga-single", M20P: "ga-single",
+    // helicopters
+    R44: "helicopter", R66: "helicopter", EC35: "helicopter", EC30: "helicopter",
+    B06: "helicopter", AS50: "helicopter", H60: "helicopter", B407: "helicopter",
+  };
+
+  const CATEGORY_LABEL = {
+    "narrowbody": "Narrowbody jet",
+    "widebody-twin": "Widebody twinjet",
+    "widebody-quad": "Widebody quadjet",
+    "regional-jet": "Regional jet",
+    "turboprop": "Turboprop",
+    "ga-single": "Light aircraft",
+    "helicopter": "Helicopter",
+    "unknown": "Aircraft",
+  };
+
+  function categorize(icaoType) {
+    if (!icaoType) return "unknown";
+    return TYPE_MAP[icaoType.trim().toUpperCase()] || "unknown";
+  }
+
+  // ---- silhouettes -----------------------------------------------------
+  // Top-down shapes, nose up, viewBox 0 0 200 200, built from polygons.
+  function fuselage(noseY, tailY, halfWidth) {
+    const midY = (noseY + tailY) / 2;
+    return `<polygon points="100,${noseY} ${100 + halfWidth},${midY} ${100 + halfWidth * 0.7},${tailY} 100,${tailY + 6} ${100 - halfWidth * 0.7},${tailY} ${100 - halfWidth},${midY}" />`;
+  }
+  function wings(wingY, halfSpan, chord) {
+    return `<polygon points="100,${wingY} ${100 + halfSpan},${wingY + chord} ${100 + halfSpan * 0.4},${wingY + chord * 1.6} ${100 - halfSpan * 0.4},${wingY + chord * 1.6} ${100 - halfSpan},${wingY + chord} 100,${wingY}" />`;
+  }
+  function tailplane(tailY, halfSpan) {
+    return `<polygon points="100,${tailY - 14} ${100 + halfSpan},${tailY + 6} ${100 + halfSpan * 0.3},${tailY + 14} ${100 - halfSpan * 0.3},${tailY + 14} ${100 - halfSpan},${tailY + 6} 100,${tailY - 14}" />`;
+  }
+  function jet(o) {
+    return fuselage(8, o.tailY, o.fuselageHalfWidth) + wings(o.wingY, o.halfSpan, o.chord) + tailplane(o.tailY, o.tailHalfSpan);
+  }
+  function svgWrap(content) {
+    return `<svg viewBox="0 0 200 200" fill="currentColor">${content}</svg>`;
+  }
+
+  const SILHOUETTES = {
+    "narrowbody": svgWrap(jet({ wingY: 100, halfSpan: 80, chord: 26, tailHalfSpan: 26, fuselageHalfWidth: 12, tailY: 178 })),
+    "widebody-twin": svgWrap(
+      jet({ wingY: 96, halfSpan: 92, chord: 30, tailHalfSpan: 32, fuselageHalfWidth: 16, tailY: 180 }) +
+      `<circle cx="58" cy="118" r="7" /><circle cx="142" cy="118" r="7" />`
+    ),
+    "widebody-quad": svgWrap(
+      jet({ wingY: 96, halfSpan: 92, chord: 30, tailHalfSpan: 32, fuselageHalfWidth: 16, tailY: 180 }) +
+      `<circle cx="46" cy="112" r="6" /><circle cx="70" cy="122" r="6" /><circle cx="130" cy="122" r="6" /><circle cx="154" cy="112" r="6" />`
+    ),
+    "regional-jet": svgWrap(jet({ wingY: 92, halfSpan: 58, chord: 20, tailHalfSpan: 20, fuselageHalfWidth: 9, tailY: 170 })),
+    "turboprop": svgWrap(
+      fuselage(10, 178, 8) + wings(86, 76, 16) + tailplane(178, 20) +
+      `<circle cx="50" cy="90" r="9" /><circle cx="150" cy="90" r="9" />`
+    ),
+    "ga-single": svgWrap(fuselage(14, 175, 6) + wings(92, 50, 12) + tailplane(175, 16)),
+    "helicopter": svgWrap(
+      `<ellipse cx="100" cy="118" rx="18" ry="36" /><rect x="98" y="150" width="4" height="32" />` +
+      `<rect x="92" y="178" width="16" height="6" /><rect x="18" y="64" width="164" height="5" rx="2.5" /><circle cx="100" cy="66" r="6" />`
+    ),
+    "unknown": svgWrap(jet({ wingY: 98, halfSpan: 74, chord: 24, tailHalfSpan: 24, fuselageHalfWidth: 11, tailY: 176 })),
+  };
+
+  function silhouetteFor(category) {
+    return SILHOUETTES[category] || SILHOUETTES.unknown;
+  }
+
+  // ---- rendering -------------------------------------------------------
+  const app = document.getElementById("app");
+  let location_ = null;
+  let pollHandle = null;
+
+  function escapeHtml(input) {
+    return String(input).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function renderStatus(message) {
+    app.innerHTML = `<p class="status">${escapeHtml(message)}</p>`;
+  }
+
+  function renderEmpty() {
+    app.innerHTML =
+      `<div class="silhouette">${silhouetteFor("unknown")}</div>` +
+      `<p class="status">No plane overhead right now. Checking again shortly…</p>`;
+  }
+
+  function infoCell(label, value) {
+    return `<div class="info-cell"><div class="info-label">${escapeHtml(label)}</div><div class="info-value">${escapeHtml(value)}</div></div>`;
+  }
+
+  function renderAircraft(a) {
+    const category = categorize(a.icaoType);
+    const heading = a.headingDeg != null ? a.headingDeg : 0;
+    const distanceKm = a.distanceNm != null ? a.distanceNm * NM_TO_KM : null;
+    const typeLine = a.description || a.icaoType || CATEGORY_LABEL[category];
+
+    app.innerHTML =
+      `<div class="silhouette" style="transform: rotate(${heading}deg)">${silhouetteFor(category)}</div>` +
+      `<p class="callsign">${escapeHtml(a.callsign || "Unknown callsign")}</p>` +
+      `<p class="category">${escapeHtml(typeLine)}${a.registration ? " · " + escapeHtml(a.registration) : ""}</p>` +
+      (a.owner ? `<p class="route">${escapeHtml(a.owner)}</p>` : "") +
+      `<div class="info-grid">` +
+        infoCell("Altitude", a.altitudeFt != null ? a.altitudeFt.toLocaleString() + " ft" : "—") +
+        infoCell("Speed", a.groundSpeedKt != null ? Math.round(a.groundSpeedKt) + " kt" : "—") +
+        infoCell("Heading", a.headingDeg != null ? Math.round(a.headingDeg) + "°" : "—") +
+        infoCell("Distance", distanceKm != null ? distanceKm.toFixed(1) + " km" : "—") +
+      `</div>` +
+      `<p class="refresh-note">Updates every ${POLL_INTERVAL_MS / 1000}s</p>`;
+  }
+
+  function renderLocationDenied() {
+    app.innerHTML =
+      `<p class="status">Location access is needed to find the plane above you. ` +
+      `Enable it in your browser settings, or enter coordinates manually.</p>` +
+      `<form class="manual-location" id="manual-form">` +
+        `<input type="number" step="any" placeholder="Latitude" id="manual-lat" required />` +
+        `<input type="number" step="any" placeholder="Longitude" id="manual-lon" required />` +
+        `<button type="submit">Go</button>` +
+      `</form>`;
+    document.getElementById("manual-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const lat = Number(document.getElementById("manual-lat").value);
+      const lon = Number(document.getElementById("manual-lon").value);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        location_ = { lat, lon };
+        startPolling();
+      }
+    });
+  }
+
+  // ---- main loop -------------------------------------------------------
+  async function tick() {
+    if (!location_) return;
+    try {
+      const nearby = await fetchNearby(location_, SEARCH_RADIUS_NM);
+      const nearest = findNearest(nearby);
+      if (!nearest) { renderEmpty(); return; }
+      renderAircraft(nearest);
+    } catch (e) {
+      renderStatus("Couldn't reach flight data. Retrying…");
+    }
+  }
+
+  function startPolling() {
+    tick();
+    if (pollHandle) clearInterval(pollHandle);
+    pollHandle = setInterval(tick, POLL_INTERVAL_MS);
+  }
+
+  async function init() {
+    renderStatus("Finding your location…");
+    try {
+      location_ = await getCurrentPosition();
+      startPolling();
+    } catch (e) {
+      renderLocationDenied();
+    }
+  }
+
+  init();
+  </script>
+</body>
 </html>
