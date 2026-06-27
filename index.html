@@ -81,6 +81,10 @@
       letter-spacing: 0.05em;
     }
     .info-value { font-size: 1.1rem; font-weight: 600; margin-top: 2px; }
+    .radar { width: 168px; height: 168px; margin-top: 6px; }
+    .radar svg { width: 100%; height: 100%; display: block; }
+    .radar-cap { color: var(--text); font-size: 0.95rem; margin-top: -4px; }
+    .radar-cap .deg { color: var(--muted); }
     .refresh-note { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
     .manual-location { display: flex; gap: 8px; margin-top: 8px; }
     .manual-location input {
@@ -327,6 +331,51 @@
     return `<p class="route">${escapeHtml(origin)}<span class="arrow">→</span>${escapeHtml(dest)}</p>` + codes;
   }
 
+  const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  function compass(deg) {
+    return COMPASS[Math.round(deg / 45) % 8];
+  }
+
+  // You-centered radar: you at the middle, the plane placed by its bearing
+  // (direction from you) and distance, scaled to the search radius. North is
+  // up. The marker points in the plane's travel heading. Uses only the
+  // bearing/distance the API already gives us — no map tiles, no deps.
+  function radarHtml(a) {
+    const cx = 100, cy = 100, maxR = 78;
+    const fullScaleNm = SEARCH_RADIUS_NM;
+    const bearing = a.bearingDeg != null ? a.bearingDeg : 0;
+    const distNm = a.distanceNm != null ? Math.min(a.distanceNm, fullScaleNm) : 0;
+    const r = (distNm / fullScaleNm) * maxR;
+    const rad = (bearing * Math.PI) / 180;
+    const px = (cx + r * Math.sin(rad)).toFixed(1);
+    const py = (cy - r * Math.cos(rad)).toFixed(1);
+    const heading = (a.headingDeg != null ? a.headingDeg : bearing).toFixed(1);
+    const label = (x, y, t) =>
+      `<text x="${x}" y="${y}" fill="var(--muted)" font-size="12" text-anchor="middle" font-family="system-ui">${t}</text>`;
+
+    const svg =
+      `<svg viewBox="0 0 200 200">` +
+        `<circle cx="100" cy="100" r="${maxR}" fill="none" stroke="#2a3650" stroke-width="1.5"/>` +
+        `<circle cx="100" cy="100" r="${(maxR * 2 / 3).toFixed(1)}" fill="none" stroke="#1c2840" stroke-width="1"/>` +
+        `<circle cx="100" cy="100" r="${(maxR / 3).toFixed(1)}" fill="none" stroke="#1c2840" stroke-width="1"/>` +
+        `<line x1="100" y1="${100 - maxR}" x2="100" y2="${100 + maxR}" stroke="#1c2840" stroke-width="1"/>` +
+        `<line x1="${100 - maxR}" y1="100" x2="${100 + maxR}" y2="100" stroke="#1c2840" stroke-width="1"/>` +
+        label(100, 100 - maxR - 5, "N") + label(100, 100 + maxR + 14, "S") +
+        label(100 + maxR + 8, 104, "E") + label(100 - maxR - 8, 104, "W") +
+        `<circle cx="100" cy="100" r="3.5" fill="var(--text)"/>` +
+        `<g transform="translate(${px} ${py}) rotate(${heading})">` +
+          `<path d="M0,-9 L6,7 L0,3.5 L-6,7 Z" fill="var(--accent)"/>` +
+        `</g>` +
+      `</svg>`;
+    return `<div class="radar">${svg}</div>`;
+  }
+
+  function radarCaptionHtml(a) {
+    if (a.bearingDeg == null) return "";
+    const b = Math.round(a.bearingDeg);
+    return `<p class="radar-cap">Look ${compass(a.bearingDeg)} <span class="deg">· ${b}°</span></p>`;
+  }
+
   function renderAircraft(a, route) {
     const category = categorize(a.icaoType);
     const heading = a.headingDeg != null ? a.headingDeg : 0;
@@ -345,6 +394,8 @@
         infoCell("Heading", a.headingDeg != null ? Math.round(a.headingDeg) + "°" : "—") +
         infoCell("Distance", distanceKm != null ? distanceKm.toFixed(1) + " km" : "—") +
       `</div>` +
+      radarHtml(a) +
+      radarCaptionHtml(a) +
       `<p class="refresh-note">Updates every ${POLL_INTERVAL_MS / 1000}s</p>`;
   }
 
