@@ -123,7 +123,7 @@
 
   // ---- config ----------------------------------------------------------
   const POLL_INTERVAL_MS = 25000;
-  const SEARCH_RADIUS_NM = 10;
+  const SEARCH_RADIUS_NM = 12; // reaches Logan (~7nm SE) plus the climb-out corridor
   const NM_TO_KM = 1.852;
 
   // ---- geolocation -----------------------------------------------------
@@ -167,14 +167,51 @@
       headingDeg: typeof raw.track === "number" ? raw.track : null,
       distanceNm: typeof raw.dst === "number" ? raw.dst : null,
       bearingDeg: typeof raw.dir === "number" ? raw.dir : null,
+      lat: typeof raw.lat === "number" ? raw.lat : null,
+      lon: typeof raw.lon === "number" ? raw.lon : null,
+      verticalRateFpm:
+        typeof raw.baro_rate === "number" ? raw.baro_rate
+        : typeof raw.geom_rate === "number" ? raw.geom_rate
+        : null,
     };
   }
 
-  // Closest airborne aircraft; the API already provides distance.
-  function findNearest(list) {
-    const airborne = list.filter((a) => a.altitudeFt !== null && a.distanceNm !== null);
-    if (airborne.length === 0) return null;
-    return airborne.reduce((best, a) =>
+  // We want the Logan runway 33L departures that stream NW over Arlington.
+  // Detect them geometrically from raw ADS-B data (reliable), not from the
+  // callsign route (often wrong for a just-departed aircraft): a plane that
+  // is low, climbing, and physically close to Logan just took off from it.
+  // The proximity-to-Logan gate also rejects climbing GA traffic out of
+  // nearby Hanscom Field (KBED).
+  const LOGAN = { lat: 42.3656, lon: -71.0096 }; // Boston Logan reference point
+  const DEPARTURE_MAX_ALT_FT = 15000; // over Arlington they're well below this
+  const DEPARTURE_MIN_CLIMB_FPM = 300;
+  const LOGAN_RADIUS_NM = 12; // liftoff through a bit past Arlington
+
+  function haversineNm(a, b) {
+    const R = 3440.065; // nautical miles
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
+    const la1 = toRad(a.lat), la2 = toRad(b.lat);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+
+  function isLoganDeparture(a) {
+    if (a.lat == null || a.lon == null || a.altitudeFt == null || a.verticalRateFpm == null || a.distanceNm == null) {
+      return false;
+    }
+    return (
+      a.altitudeFt <= DEPARTURE_MAX_ALT_FT &&
+      a.verticalRateFpm >= DEPARTURE_MIN_CLIMB_FPM &&
+      haversineNm(a, LOGAN) <= LOGAN_RADIUS_NM
+    );
+  }
+
+  // Among Logan departures, the one nearest you is the most overhead.
+  function pickLoganDeparture(list) {
+    const deps = list.filter(isLoganDeparture);
+    if (deps.length === 0) return null;
+    return deps.reduce((best, a) =>
       (a.distanceNm ?? Infinity) < (best.distanceNm ?? Infinity) ? a : best
     );
   }
@@ -197,6 +234,7 @@
         if (fr && fr.origin && fr.destination) {
           result = {
             originCode: fr.origin.iata_code || fr.origin.icao_code || null,
+            originIcao: fr.origin.icao_code || null,
             originCity: fr.origin.municipality || null,
             destCode: fr.destination.iata_code || fr.destination.icao_code || null,
             destCity: fr.destination.municipality || null,
@@ -365,10 +403,11 @@
     app.innerHTML = `<p class="status">${escapeHtml(message)}</p>`;
   }
 
-  function renderEmpty() {
+  function renderNoDepartures() {
     app.innerHTML =
       `<div class="silhouette">${silhouetteFor("unknown")}</div>` +
-      `<p class="status">No plane overhead right now. Checking again shortly…</p>`;
+      `<p class="status">No Logan departures overhead right now.<br>` +
+      `The runway 33L corridor is busiest when winds are from the northwest. Checking again…</p>`;
   }
 
   function infoCell(label, value) {
@@ -376,15 +415,17 @@
   }
 
   function routeHtml(route) {
-    if (!route || (!route.destCode && !route.originCode && !route.destCity && !route.originCity)) return "";
-    // Prefer city names; fall back to the airport code if a city is missing.
-    const origin = route.originCity || route.originCode || "?";
-    const dest = route.destCity || route.destCode || "?";
-    const codes =
-      route.originCode || route.destCode
-        ? `<p class="route-sub">${escapeHtml(route.originCode || "?")} → ${escapeHtml(route.destCode || "?")}</p>`
-        : "";
-    return `<p class="route">${escapeHtml(origin)}<span class="arrow">→</span>${escapeHtml(dest)}</p>` + codes;
+    // We already know (geometrically) the plane is departing Logan. adsbdb's
+    // callsign route is only trustworthy when it agrees the origin is Boston;
+    // for many departures it returns the inbound leg (Boston as destination),
+    // which would mislead — so in that case we show only what we're sure of.
+    const trustworthy = route && route.originIcao === "KBOS" && (route.destCity || route.destCode);
+    if (trustworthy) {
+      const dest = route.destCity || route.destCode;
+      const codes = route.destCode ? `<p class="route-sub">BOS → ${escapeHtml(route.destCode)}</p>` : "";
+      return `<p class="route">Boston<span class="arrow">→</span>${escapeHtml(dest)}</p>` + codes;
+    }
+    return `<p class="route">Departing Boston Logan</p>`;
   }
 
   const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -491,19 +532,21 @@
   async function tick() {
     if (!location_) return;
     try {
-      const nearby = await fetchNearby(location_, SEARCH_RADIUS_NM);
-      const nearest = findNearest(nearby);
-      if (!nearest) { renderEmpty(); return; }
       const myId = ++renderId;
-      // Show the plane right away (silhouette + no route), then enrich with
-      // the route and a real photo once those load.
-      renderAircraft(nearest, null, null);
+      const nearby = await fetchNearby(location_, SEARCH_RADIUS_NM);
+
+      // Strict Logan-departures mode: only planes climbing out of Logan.
+      const chosen = pickLoganDeparture(nearby);
+      if (!chosen) { renderNoDepartures(); return; }
+
+      // Show the plane right away, then enrich with route + photo once loaded.
+      // The route is best-effort (callsign-based) and shows where it's headed.
+      renderAircraft(chosen, null, null);
       const [route, photo] = await Promise.all([
-        nearest.callsign ? fetchRoute(nearest.callsign) : Promise.resolve(null),
-        nearest.hex ? fetchPhoto(nearest.hex) : Promise.resolve(null),
+        chosen.callsign ? fetchRoute(chosen.callsign) : Promise.resolve(null),
+        chosen.hex ? fetchPhoto(chosen.hex) : Promise.resolve(null),
       ]);
-      // Ignore if a newer tick has since rendered a different aircraft.
-      if (myId === renderId) renderAircraft(nearest, route, photo);
+      if (myId === renderId) renderAircraft(chosen, route, photo);
     } catch (e) {
       renderStatus("Couldn't reach flight data. Retrying…");
     }
