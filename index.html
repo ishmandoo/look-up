@@ -56,9 +56,9 @@
       font-size: 0.95rem;
       margin-top: -8px;
     }
-    .route { font-size: 1.35rem; font-weight: 600; color: var(--text); }
+    .route { font-size: 1.25rem; font-weight: 600; color: var(--text); max-width: 320px; line-height: 1.3; }
     .route .arrow { color: var(--accent); margin: 0 6px; }
-    .route-sub { color: var(--muted); font-size: 0.85rem; margin-top: -10px; }
+    .route-sub { color: var(--muted); font-size: 0.8rem; letter-spacing: 0.05em; margin-top: -10px; }
     .owner { font-size: 1rem; color: var(--text); }
     .info-grid {
       display: grid;
@@ -316,14 +316,15 @@
   }
 
   function routeHtml(route) {
-    if (!route || (!route.destCode && !route.originCode)) return "";
-    const origin = route.originCode || "?";
-    const dest = route.destCode || "?";
-    const cities =
-      route.originCity || route.destCity
-        ? `<p class="route-sub">${escapeHtml(route.originCity || "?")} → ${escapeHtml(route.destCity || "?")}</p>`
+    if (!route || (!route.destCode && !route.originCode && !route.destCity && !route.originCity)) return "";
+    // Prefer city names; fall back to the airport code if a city is missing.
+    const origin = route.originCity || route.originCode || "?";
+    const dest = route.destCity || route.destCode || "?";
+    const codes =
+      route.originCode || route.destCode
+        ? `<p class="route-sub">${escapeHtml(route.originCode || "?")} → ${escapeHtml(route.destCode || "?")}</p>`
         : "";
-    return `<p class="route">${escapeHtml(origin)}<span class="arrow">→</span>${escapeHtml(dest)}</p>` + cities;
+    return `<p class="route">${escapeHtml(origin)}<span class="arrow">→</span>${escapeHtml(dest)}</p>` + codes;
   }
 
   function renderAircraft(a, route) {
