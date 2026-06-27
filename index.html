@@ -56,7 +56,10 @@
       font-size: 0.95rem;
       margin-top: -8px;
     }
-    .route { font-size: 1.1rem; color: var(--text); }
+    .route { font-size: 1.35rem; font-weight: 600; color: var(--text); }
+    .route .arrow { color: var(--accent); margin: 0 6px; }
+    .route-sub { color: var(--muted); font-size: 0.85rem; margin-top: -10px; }
+    .owner { font-size: 1rem; color: var(--text); }
     .info-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(110px, 1fr));
@@ -160,6 +163,37 @@
     return airborne.reduce((best, a) =>
       (a.distanceNm ?? Infinity) < (best.distanceNm ?? Infinity) ? a : best
     );
+  }
+
+  // ---- route lookup (adsbdb.com) --------------------------------------
+  // airplanes.live doesn't carry route info, so look up origin/destination
+  // by callsign from adsbdb.com (free, no key, sends CORS: *). Results are
+  // cached per callsign — including misses — so we don't re-query each tick.
+  const routeCache = new Map();
+  async function fetchRoute(callsign) {
+    const key = (callsign || "").trim();
+    if (!key) return null;
+    if (routeCache.has(key)) return routeCache.get(key);
+    let result = null;
+    try {
+      const res = await fetch("https://api.adsbdb.com/v0/callsign/" + encodeURIComponent(key));
+      if (res.ok) {
+        const data = await res.json();
+        const fr = data && data.response && data.response.flightroute;
+        if (fr && fr.origin && fr.destination) {
+          result = {
+            originCode: fr.origin.iata_code || fr.origin.icao_code || null,
+            originCity: fr.origin.municipality || null,
+            destCode: fr.destination.iata_code || fr.destination.icao_code || null,
+            destCity: fr.destination.municipality || null,
+          };
+        }
+      }
+    } catch (e) {
+      /* network/parse error — treat as no route, don't disrupt the card */
+    }
+    routeCache.set(key, result);
+    return result;
   }
 
   // ---- aircraft type -> category --------------------------------------
@@ -281,7 +315,18 @@
     return `<div class="info-cell"><div class="info-label">${escapeHtml(label)}</div><div class="info-value">${escapeHtml(value)}</div></div>`;
   }
 
-  function renderAircraft(a) {
+  function routeHtml(route) {
+    if (!route || (!route.destCode && !route.originCode)) return "";
+    const origin = route.originCode || "?";
+    const dest = route.destCode || "?";
+    const cities =
+      route.originCity || route.destCity
+        ? `<p class="route-sub">${escapeHtml(route.originCity || "?")} → ${escapeHtml(route.destCity || "?")}</p>`
+        : "";
+    return `<p class="route">${escapeHtml(origin)}<span class="arrow">→</span>${escapeHtml(dest)}</p>` + cities;
+  }
+
+  function renderAircraft(a, route) {
     const category = categorize(a.icaoType);
     const heading = a.headingDeg != null ? a.headingDeg : 0;
     const distanceKm = a.distanceNm != null ? a.distanceNm * NM_TO_KM : null;
@@ -291,7 +336,8 @@
       `<div class="silhouette" style="transform: rotate(${heading}deg)">${silhouetteFor(category)}</div>` +
       `<p class="callsign">${escapeHtml(a.callsign || "Unknown callsign")}</p>` +
       `<p class="category">${escapeHtml(typeLine)}${a.registration ? " · " + escapeHtml(a.registration) : ""}</p>` +
-      (a.owner ? `<p class="route">${escapeHtml(a.owner)}</p>` : "") +
+      routeHtml(route) +
+      (a.owner ? `<p class="owner">${escapeHtml(a.owner)}</p>` : "") +
       `<div class="info-grid">` +
         infoCell("Altitude", a.altitudeFt != null ? a.altitudeFt.toLocaleString() + " ft" : "—") +
         infoCell("Speed", a.groundSpeedKt != null ? Math.round(a.groundSpeedKt) + " kt" : "—") +
@@ -322,13 +368,21 @@
   }
 
   // ---- main loop -------------------------------------------------------
+  let renderId = 0;
   async function tick() {
     if (!location_) return;
     try {
       const nearby = await fetchNearby(location_, SEARCH_RADIUS_NM);
       const nearest = findNearest(nearby);
       if (!nearest) { renderEmpty(); return; }
-      renderAircraft(nearest);
+      const myId = ++renderId;
+      // Show the plane right away, then fill in the route once it loads.
+      renderAircraft(nearest, null);
+      if (nearest.callsign) {
+        const route = await fetchRoute(nearest.callsign);
+        // Ignore if a newer tick has since rendered a different aircraft.
+        if (route && myId === renderId) renderAircraft(nearest, route);
+      }
     } catch (e) {
       renderStatus("Couldn't reach flight data. Retrying…");
     }
