@@ -46,6 +46,16 @@
       transition: transform 0.6s ease;
     }
     .silhouette svg { width: 100%; height: 100%; display: block; }
+    .photo {
+      width: 100%;
+      max-width: 320px;
+      height: auto;
+      border-radius: 12px;
+      display: block;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+    }
+    .credit { font-size: 0.72rem; color: var(--muted); margin-top: -8px; }
+    .credit a { color: var(--muted); }
     .callsign {
       font-size: 1.8rem;
       font-weight: 700;
@@ -200,6 +210,48 @@
     return result;
   }
 
+  // ---- aircraft photo (planespotters.net) -----------------------------
+  // A real photo of the exact airframe (correct livery), keyed by hex.
+  // planespotters 403s server-side bots but returns 200 to real browsers.
+  // We preload the image before committing, so a broken URL silently falls
+  // back to the silhouette instead of flashing a broken image. Cached per
+  // hex (including misses).
+  const photoCache = new Map();
+  function preloadImage(src) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(true);
+      img.onerror = () => resolve(false);
+      img.src = src;
+      setTimeout(() => resolve(false), 8000);
+    });
+  }
+  async function fetchPhoto(hex) {
+    const key = (hex || "").trim().toLowerCase();
+    if (!key) return null;
+    if (photoCache.has(key)) return photoCache.get(key);
+    let result = null;
+    try {
+      const res = await fetch("https://api.planespotters.net/pub/photos/hex/" + encodeURIComponent(key));
+      if (res.ok) {
+        const data = await res.json();
+        const p = data && data.photos && data.photos[0];
+        const src = p && p.thumbnail_large && p.thumbnail_large.src;
+        if (src && (await preloadImage(src))) {
+          result = {
+            src: src,
+            photographer: p.photographer || "planespotters.net",
+            link: p.link || "https://www.planespotters.net",
+          };
+        }
+      }
+    } catch (e) {
+      /* network/parse error — fall back to the silhouette */
+    }
+    photoCache.set(key, result);
+    return result;
+  }
+
   // ---- aircraft type -> category --------------------------------------
   const TYPE_MAP = {
     // narrowbody twinjets
@@ -305,6 +357,10 @@
     return String(input).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
+  function escapeAttr(input) {
+    return escapeHtml(input).replace(/"/g, "&quot;");
+  }
+
   function renderStatus(message) {
     app.innerHTML = `<p class="status">${escapeHtml(message)}</p>`;
   }
@@ -376,14 +432,25 @@
     return `<p class="radar-cap">Look ${compass(a.bearingDeg)} <span class="deg">· ${b}°</span></p>`;
   }
 
-  function renderAircraft(a, route) {
+  function heroHtml(a, category, heading, photo) {
+    if (photo) {
+      const alt = a.description || a.icaoType || "aircraft";
+      return (
+        `<img class="photo" src="${escapeAttr(photo.src)}" alt="${escapeAttr(alt)}" />` +
+        `<p class="credit">📷 <a href="${escapeAttr(photo.link)}" target="_blank" rel="noopener">${escapeHtml(photo.photographer)}</a></p>`
+      );
+    }
+    return `<div class="silhouette" style="transform: rotate(${heading}deg)">${silhouetteFor(category)}</div>`;
+  }
+
+  function renderAircraft(a, route, photo) {
     const category = categorize(a.icaoType);
     const heading = a.headingDeg != null ? a.headingDeg : 0;
     const distanceKm = a.distanceNm != null ? a.distanceNm * NM_TO_KM : null;
     const typeLine = a.description || a.icaoType || CATEGORY_LABEL[category];
 
     app.innerHTML =
-      `<div class="silhouette" style="transform: rotate(${heading}deg)">${silhouetteFor(category)}</div>` +
+      heroHtml(a, category, heading, photo) +
       `<p class="callsign">${escapeHtml(a.callsign || "Unknown callsign")}</p>` +
       `<p class="category">${escapeHtml(typeLine)}${a.registration ? " · " + escapeHtml(a.registration) : ""}</p>` +
       routeHtml(route) +
@@ -428,13 +495,15 @@
       const nearest = findNearest(nearby);
       if (!nearest) { renderEmpty(); return; }
       const myId = ++renderId;
-      // Show the plane right away, then fill in the route once it loads.
-      renderAircraft(nearest, null);
-      if (nearest.callsign) {
-        const route = await fetchRoute(nearest.callsign);
-        // Ignore if a newer tick has since rendered a different aircraft.
-        if (route && myId === renderId) renderAircraft(nearest, route);
-      }
+      // Show the plane right away (silhouette + no route), then enrich with
+      // the route and a real photo once those load.
+      renderAircraft(nearest, null, null);
+      const [route, photo] = await Promise.all([
+        nearest.callsign ? fetchRoute(nearest.callsign) : Promise.resolve(null),
+        nearest.hex ? fetchPhoto(nearest.hex) : Promise.resolve(null),
+      ]);
+      // Ignore if a newer tick has since rendered a different aircraft.
+      if (myId === renderId) renderAircraft(nearest, route, photo);
     } catch (e) {
       renderStatus("Couldn't reach flight data. Retrying…");
     }
