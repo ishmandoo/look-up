@@ -125,6 +125,10 @@
   const POLL_INTERVAL_MS = 25000;
   const SEARCH_RADIUS_NM = 12; // reaches Logan (~7nm SE) plus the climb-out corridor
   const NM_TO_KM = 1.852;
+  // The radar is oriented so the way your house faces points up. Compass
+  // bearing your house faces, in degrees (N=0, E=90, S=180, W=270).
+  // ~165 = slightly east of due south. Tweak to taste.
+  const FACING_BEARING_DEG = 165;
 
   // ---- geolocation -----------------------------------------------------
   function getCurrentPosition() {
@@ -434,8 +438,10 @@
   }
 
   // You-centered radar: you at the middle, the plane placed by its bearing
-  // (direction from you) and distance, scaled to the search radius. North is
-  // up. The marker points in the plane's travel heading. Uses only the
+  // (direction from you) and distance, scaled to the search radius. Rotated
+  // so the way your house faces (FACING_BEARING_DEG) points UP — the accent
+  // tick at the top marks your view; the N/E/S/W labels swing accordingly.
+  // The marker points in the plane's true travel heading. Uses only the
   // bearing/distance the API already gives us — no map tiles, no deps.
   function radarHtml(a) {
     const cx = 100, cy = 100, maxR = 78;
@@ -443,12 +449,23 @@
     const bearing = a.bearingDeg != null ? a.bearingDeg : 0;
     const distNm = a.distanceNm != null ? Math.min(a.distanceNm, fullScaleNm) : 0;
     const r = (distNm / fullScaleNm) * maxR;
-    const rad = (bearing * Math.PI) / 180;
-    const px = (cx + r * Math.sin(rad)).toFixed(1);
-    const py = (cy - r * Math.cos(rad)).toFixed(1);
-    const heading = (a.headingDeg != null ? a.headingDeg : bearing).toFixed(1);
-    const label = (x, y, t) =>
-      `<text x="${x}" y="${y}" fill="var(--muted)" font-size="12" text-anchor="middle" font-family="system-ui">${t}</text>`;
+
+    // Map a true compass bearing to an x,y on the radar, with the facing
+    // direction rotated to the top.
+    const toXY = (trueDeg, radius) => {
+      const ang = ((trueDeg - FACING_BEARING_DEG) * Math.PI) / 180;
+      return [cx + radius * Math.sin(ang), cy - radius * Math.cos(ang)];
+    };
+
+    const [px, py] = toXY(bearing, r);
+    const markerRot = ((a.headingDeg != null ? a.headingDeg : bearing) - FACING_BEARING_DEG).toFixed(1);
+
+    const dirLabels = [[0, "N"], [90, "E"], [180, "S"], [270, "W"]]
+      .map(([deg, t]) => {
+        const [lx, ly] = toXY(deg, maxR + 13);
+        return `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="var(--muted)" font-size="12" text-anchor="middle" dominant-baseline="middle" font-family="system-ui">${t}</text>`;
+      })
+      .join("");
 
     const svg =
       `<svg viewBox="0 0 200 200">` +
@@ -457,10 +474,11 @@
         `<circle cx="100" cy="100" r="${(maxR / 3).toFixed(1)}" fill="none" stroke="#1c2840" stroke-width="1"/>` +
         `<line x1="100" y1="${100 - maxR}" x2="100" y2="${100 + maxR}" stroke="#1c2840" stroke-width="1"/>` +
         `<line x1="${100 - maxR}" y1="100" x2="${100 + maxR}" y2="100" stroke="#1c2840" stroke-width="1"/>` +
-        label(100, 100 - maxR - 5, "N") + label(100, 100 + maxR + 14, "S") +
-        label(100 + maxR + 8, 104, "E") + label(100 - maxR - 8, 104, "W") +
+        // "your view" tick at the top
+        `<path d="M100 ${100 - maxR - 11} L95 ${100 - maxR - 2} L105 ${100 - maxR - 2} Z" fill="var(--accent)"/>` +
+        dirLabels +
         `<circle cx="100" cy="100" r="3.5" fill="var(--text)"/>` +
-        `<g transform="translate(${px} ${py}) rotate(${heading})">` +
+        `<g transform="translate(${px.toFixed(1)} ${py.toFixed(1)}) rotate(${markerRot})">` +
           `<path d="M0,-9 L6,7 L0,3.5 L-6,7 Z" fill="var(--accent)"/>` +
         `</g>` +
       `</svg>`;
